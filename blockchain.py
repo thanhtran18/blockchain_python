@@ -14,19 +14,19 @@ class Block:
         self.nonce = nonce
 
     # create the hash of the block
-    def calculate_hash(block):
+    def calculate_hash(self):
         block_string = json.dumps(self.__dict__, sort_keys=True)
         return sha256(block_string.encode()).hexdigest()
 
 
 class Blockchain:
-    difficulty = 2
+    difficulty = 2  # for proof of work
 
     def __init__(self):
         self.unconfirmed_transactions = []
         self.chain = []
-        self.create_genesis()
 
+    # create the first block (genesis)
     def create_genesis(self):
         genesis = Block(0, [], time.time(), "0")
         genesis.hash = genesis.calculate_hash()
@@ -48,6 +48,7 @@ class Blockchain:
 
     def add_block(self, new_block, proof_of_work):
         curr_prev_hash = self.get_last_block.hash
+        # verify the new block before adding it to the chain
         if curr_prev_hash != new_block.prev_hash or not self.is_valid_proof_work(new_block, proof_of_work):
             return False
         else:
@@ -76,7 +77,7 @@ class Blockchain:
             self.add_block(new_block, proof)
             self.unconfirmed_transactions = []
             # broadcast this to the network
-            announce_added_block(new_block)
+            broadcast_added_block(new_block)
             return new_block.index
         else:
             return False
@@ -101,9 +102,15 @@ class Blockchain:
 
 app = Flask(__name__)
 
+# my copy of the blockchain
 blockchain = Blockchain()
+blockchain.create_genesis()
 
-# receive new transaction to the blockchain
+# create an address so other can join the network
+peers = set()
+
+# BACKEND operations
+# receive new transaction and add to the (pending) blockchain
 @app.route('/new_transaction', methods=['POST'])
 def receive_new_transaction():
     new_transaction = request.get_json()
@@ -120,10 +127,12 @@ def receive_new_transaction():
 # return the node's copy of the chain by querying all of the posts
 @app.route('/chain', methods=['GET'])
 def get_chain():
+    # get the longest chain
+    consensus()
     chain = []
     for block in blockchain.chain:
         chain.append(block.__dict__)
-    return json.dumps({'length': len(chain), 'chain': chain})
+    return json.dumps({'length': len(chain), 'chain': chain, 'peers': list(peers)})
 
 # receive request to mine unconfirmed transactions
 @app.route('/mine', methods=['GET'])
@@ -134,24 +143,71 @@ def mine_unconfirmed_transactions():
     return 'No transactions to mine'
 
 # query unconfirmed transactions
-@app.route('/pending_transaction')
-def get_pending_transaction():
+@app.route('/pending_transactions')
+def get_pending_transactions():
     return json.dumps(blockchain.unconfirmed_transactions)
 
-
-# create an address so other can join the network
-peers = set()
 
 # receive request to join the network
 @app.route('/add_nodes', methods=['POST'])
 def register_new_peers():
-    nodes = request.get_json()
-    if nodes:
-        for node in nodes:
-            peers.add(node)
-        return 'Success', 201
+    node_address = request.get_json()['node_address']
+    if node_address:
+        peers.add(node_address)
+        return get_chain()
     else:
         return 'Invalid Data', 400
+
+
+# add a new block to the node's chain
+@app.route('/add_block', methods=['POST'])
+def validate_and_add_block():
+    new_block_data = request.get_json()
+    new_block = Block(new_block_data['index'], new_block_data['transactions'],
+                      new_block_data['timestamp'], new_block_data['prev_hash'])
+    proof = new_block_data['hash']
+    added = blockchain.add_block(new_block, proof)
+    if added:
+        return 'A new block was added to the blockchain', 201
+    return 'Failed to add the new block to the blockchain', 400
+
+
+@app.route('/register_with', methods=['POST'])
+def register_with_existing_node():
+    node_address = request.get_json()['node_address']
+    if node_address:
+        data = {'node_address': request.host_url}
+        headers = {'Content-Type:': 'application/json'}
+
+        response = requests.post(node_address + '/add_nodes', data=json.dumps(data), headers=headers)
+
+        if response.status_code == 200:
+            global blockchain
+            global peers
+            # update the chain
+            chain_dump = response.json()['chain']
+            blockchain = create_chain_from_dump(chain_dump)
+            peers.update(response.json()['peers'])
+            return 'Registration Successful', 200
+        else:
+            return response.content, response.status_code
+    else:
+        return 'Invalid data', 400
+
+
+def create_chain_from_dump(chain_dump):
+    blockchain = Blockchain()
+    for index, block_data in enumerate(chain_dump):
+        block = Block(block_data['index'], block_data['transactions'],
+                      block_data['timestamp'], block_data['prev_hash'])
+        proof = block_data['hash']
+        if index > 0:
+            added = blockchain.add_block(block, proof)
+            if not added:
+                raise Exception('The chain dump is tampered!')
+        else:
+            blockchain.chain.append(block)
+    return blockchain
 
 
 def consensus():
@@ -160,7 +216,9 @@ def consensus():
     curr_length = len(blockchain)
 
     for peer in peers:
+        print('{}/chain'.format(peer))
         response = requests.get('http://{}/chain'.format(peer))
+        print('Content', response.content)
         length = response.json()['length']
         chain = response.json()['chain']
         if length > curr_length and blockchain.is_chain_valid(chain):
@@ -173,20 +231,8 @@ def consensus():
         return True
     return False
 
-# add a new block to the node's chain
-@app.route('/add_block', methods=['POST'])
-def validate_and_add_block():
-    new_block_data = request.get_json()
-    new_block = Block(new_block_data['index'], new_block_data['transactions'],
-                      new_block_data['timestamp'], new_block_data['pre_hash'])
-    proof = new_block_data['hash']
-    added = blockchain.add_block(new_block, proof)
-    if added:
-        return 'A new block was added to the blockchain', 201
-    return 'Failed to add the new block to the blockchain', 400
 
-
-def announce_added_block(new_block):
+def broadcast_added_block(new_block):
     for peer in peers:
         url = 'http://{}/add_block'.format(peer)
         requests.post(url, data=json.dumps(new_block.__dict__, sort_keys=True))
