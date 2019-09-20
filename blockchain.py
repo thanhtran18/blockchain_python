@@ -56,7 +56,8 @@ class Blockchain:
             return True
 
     # check the validity of the block hash and to see if it satisfies the difficulty
-    def is_valid_proof_work(self, new_block, new_block_hash):
+    @classmethod
+    def is_valid_proof_work(cls, new_block, new_block_hash):
         return (new_block_hash.startswith('0' * Blockchain.difficulty)
                 and new_block_hash == new_block.calculate_hash())
 
@@ -74,9 +75,28 @@ class Blockchain:
             proof = self.create_proof_of_work(new_block)
             self.add_block(new_block, proof)
             self.unconfirmed_transactions = []
+            # broadcast this to the network
+            announce_added_block(new_block)
             return new_block.index
         else:
             return False
+
+    @classmethod
+    def is_chain_valid(cls, chain):
+        result = True
+        prev_hash = '0'
+
+        for block in chain:
+            block_hash = block.hash
+            # remove and recompute the hash
+            delattr(block, "hash")
+
+            if not cls.is_valid_proof_work(block, block.hash) or prev_hash != block.prev_hash:
+                result = False
+                break
+
+            block.hash, prev_hash = block_hash, block_hash
+        return result
 
 
 app = Flask(__name__)
@@ -117,6 +137,59 @@ def mine_unconfirmed_transactions():
 @app.route('/pending_transaction')
 def get_pending_transaction():
     return json.dumps(blockchain.unconfirmed_transactions)
+
+
+# create an address so other can join the network
+peers = set()
+
+# receive request to join the network
+@app.route('/add_nodes', methods=['POST'])
+def register_new_peers():
+    nodes = request.get_json()
+    if nodes:
+        for node in nodes:
+            peers.add(node)
+        return 'Success', 201
+    else:
+        return 'Invalid Data', 400
+
+
+def consensus():
+    global blockchain
+    longest_chain = None
+    curr_length = len(blockchain)
+
+    for peer in peers:
+        response = requests.get('http://{}/chain'.format(peer))
+        length = response.json()['length']
+        chain = response.json()['chain']
+        if length > curr_length and blockchain.is_chain_valid(chain):
+            curr_length = length
+            longest_chain = chain
+
+    # if a longer valid chain is found, it becomes the new global blockchain
+    if longest_chain:
+        blockchain = longest_chain
+        return True
+    return False
+
+# add a new block to the node's chain
+@app.route('/add_block', methods=['POST'])
+def validate_and_add_block():
+    new_block_data = request.get_json()
+    new_block = Block(new_block_data['index'], new_block_data['transactions'],
+                      new_block_data['timestamp'], new_block_data['pre_hash'])
+    proof = new_block_data['hash']
+    added = blockchain.add_block(new_block, proof)
+    if added:
+        return 'A new block was added to the blockchain', 201
+    return 'Failed to add the new block to the blockchain', 400
+
+
+def announce_added_block(new_block):
+    for peer in peers:
+        url = 'http://{}/add_block'.format(peer)
+        requests.post(url, data=json.dumps(new_block.__dict__, sort_keys=True))
 
 
 app.run(debug=True, port=8000)
