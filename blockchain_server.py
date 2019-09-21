@@ -238,4 +238,4 @@ def broadcast_added_block(new_block):
         requests.post(url, data=json.dumps(new_block.__dict__, sort_keys=True))
 
 
-app.run(debug=True, port=8000)
+# app.run(debug=True, port=8000)
